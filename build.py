@@ -1,67 +1,28 @@
 import os
 import re
 import string
-import subprocess
 
 import ReQLprotodef as protodef
 
 
-def lint():
-    build()
-
-    print('linting rethinkdb.lua')
-
-    returncode = subprocess.call(['luac', 'rethinkdb.lua'], cwd='src')
-    if returncode:
-        exit(returncode)
-
-    print('linting tests')
-
-    for test in os.listdir('spec'):
-        if test.endswith('.lua'):
-            returncode = subprocess.call(['luac', test], cwd='spec')
-            if returncode:
-                exit(returncode)
-
-    print('linting successful')
-
-
-def build():
-    print('building rethinkdb.lua')
-
-    ast_constants = list({
-        term for term in dir(protodef.Term.TermType)
-        if not term.startswith('_')
-    } - {'DATUM', 'IMPLICIT_VAR'})
-
-    ast_constants.sort()
-
-    ast_method_names = {
-        name: {
-            'AND': 'and_', 'BRACKET': 'index', 'ERROR': 'error_',
-            'FUNCALL': 'do_', 'JAVASCRIPT': 'js', 'NOT': 'not_', 'OR': 'or_'
-        }.get(name, name.lower())
-        for name in ast_constants
-    }
-    ast_classes = [
+def ast_classes(ast_constants, ast_method_names):
+    return '\n'.join(
         '{0} = ast({0!r}, {{tt = {1}, st = {2!r}}})'.format(
             name,
             getattr(protodef.Term.TermType, name),
             ast_method_names[name]
         ) for name in ast_constants
-    ]
+    )
 
-    def const_args(num):
-        args = ['arg{}'.format(n) for n in range(num)]
-        pieces = [
-            '{} = function(',
-            ', '.join(args + ['opts']),
-            ') return {}(',
-            ', '.join(['opts'] + args),
-            ') end'
-        ]
-        return ''.join(pieces)
 
+def const_args(num):
+    args = ', '.join('arg{}'.format(n) for n in range(num))
+    return ''.join((
+        '{} = function(', args, ', opts) return {}(opts, ', args, ') end'
+    ))
+
+
+def ast_methods(ast_constants, ast_method_names):
     ast_methods_w_opt = dict(
         {
             name: '{} = function(...) return {}(get_opts(...)) end'
@@ -81,49 +42,72 @@ def build():
         INSERT=const_args(2),
         UPDATE=const_args(2)
     )
-    ast_methods = [
+    return ',\n  '.join(
         ast_methods_w_opt.get(
             name, '{} = function(...) return {}({{}}, ...) end'
         ).format(
             ast_method_names[name], name
         ) for name in ast_constants
-    ]
+    )
 
-    ast_constants.reverse()
 
-    lines = ['local {}'.format(ast_constants.pop())]
-    while ast_constants:
-        name = ast_constants.pop()
-        if len(lines[-1]) + len(name) < 77:
+def ast_names(ast_constants):
+    lines = []
+    for name in ast_constants:
+        if lines and len(lines[-1]) + len(name) < 77:
             lines[-1] += ', {}'.format(name)
         else:
             lines.append('local {}'.format(name))
+    return '\n'.join(lines)
 
-    class BuildFormat(string.Formatter):
-        fspec = re.compile('--\[\[(.+?)\]\]')
 
-        def parse(self, string):
-            last = 0
-            for match in self.fspec.finditer(string):
-                yield string[last:match.start()], match.group(1), '', 's'
-                last = match.end()
-            yield string[last:], None, None, None
+ast_constants = sorted(
+    term for term in dir(protodef.Term.TermType)
+    if not term.startswith('_') and term not in ('DATUM', 'IMPLICIT_VAR')
+)
 
-    with open('src/rethinkdb.pre.lua') as io:
+ast_method_names = {name: name.lower() for name in ast_constants}
+ast_method_names.update({
+    'AND': 'and_', 'BRACKET': 'index', 'ERROR': 'error_', 'FUNCALL': 'do_',
+    'JAVASCRIPT': 'js', 'NOT': 'not_', 'OR': 'or_'
+})
+
+format_kwargs = {
+    'AstClasses': ast_classes(ast_constants, ast_method_names),
+    'AstMethods': ast_methods(ast_constants, ast_method_names),
+    'AstNames': ast_names(ast_constants),
+    'Query': protodef.Query.QueryType,
+    'Response': protodef.Response.ResponseType,
+    'Term': protodef.Term.TermType,
+}
+
+
+class BuildFormat(string.Formatter):
+    fspec = re.compile('--\[\[(.+?)\]\]')
+
+    def parse(self, string):
+        last = 0
+        for match in self.fspec.finditer(string):
+            yield string[last:match.start()], match.group(1), '', 's'
+            last = match.end()
+        yield string[last:], None, None, None
+
+
+def process(file_name):
+    with open('src/' + file_name + '.pre.lua') as io:
         s = io.read()
-    s = BuildFormat().vformat(s, (), {
-        'AstClasses': '\n'.join(ast_classes),
-        'AstMethods': ',\n  '.join(ast_methods),
-        'AstNames': '\n'.join(lines),
-        'Query': protodef.Query.QueryType,
-        'Response': protodef.Response.ResponseType,
-        'Term': protodef.Term.TermType,
-    })
-    with open('src/rethinkdb.lua', 'w') as io:
+    s = BuildFormat().vformat(s, (), format_kwargs)
+    with open('src/' + file_name + '.lua', 'w') as io:
         io.write(s)
+
+
+def main():
+    print('building source')
+
+    process('rethinkdb')
 
     print('building successful')
 
 
 if __name__ == '__main__':
-    lint()
+    main()
