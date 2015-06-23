@@ -1,5 +1,6 @@
 local class = require'reql/class'
-local pprint = require'reql/pprint'
+local Cursor = require'reql/cursor'
+local errors = require'reql/errors'
 
 -- r is both the main export table for the module
 -- and a function that wraps a native Lua value in a ReQL datum
@@ -80,8 +81,6 @@ end
 
 local DATUMTERM, ReQLOp
 --[[AstNames]]
-local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
-local ReQLClientError, ReQLError
 
 function r.is_instance(obj, cls, ...)
   if cls == nil then return false end
@@ -190,7 +189,7 @@ function convert_pseudotype(obj, opts)
     local time_format = opts.time_format
     if 'native' == time_format or not time_format then
       if not (obj['epoch_time']) then
-        return r._logger(ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
+        return r._logger(errors.ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
       end
 
       -- We ignore the timezone field of the pseudo-type TIME table. JS dates do not support timezones.
@@ -201,7 +200,7 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == time_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
     end
   elseif 'GROUPED_DATA' == reql_type then
     local group_format = opts.group_format
@@ -220,19 +219,19 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == group_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
     end
   elseif 'BINARY' == reql_type then
     local binary_format = opts.binary_format
     if 'native' == binary_format or not binary_format then
       if not obj.data then
-        return r._logger(ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
+        return r._logger(errors.ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
       end
       return r._unb64(obj.data)
     elseif 'raw' == binary_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
     end
   else
     -- Regular table or unknown pseudo type
@@ -249,25 +248,6 @@ function recursively_convert_pseudotype(obj, opts)
   end
   return obj
 end
-
-ReQLError = class(
-  'ReQLError',
-  function(self, msg, term, frames)
-    self.msg = msg
-    self.message = self.__class.__name .. ' ' .. msg
-    if term then
-      self.message = self.message .. ' in:\n' .. pprint(term, frames)
-    end
-  end
-)
-
-ReQLDriverError = class('ReQLDriverError', ReQLError, {})
-
-ReQLServerError = class('ReQLServerError', ReQLError, {})
-
-ReQLRuntimeError = class('ReQLRuntimeError', ReQLServerError, {})
-ReQLCompileError = class('ReQLCompileError', ReQLServerError, {})
-ReQLClientError = class('ReQLClientError', ReQLServerError, {})
 
 -- All top level exported functions
 
@@ -294,7 +274,7 @@ ast_methods = {
         connection = r._pool
       else
         if callback then
-          return callback(ReQLDriverError('First argument to `run` must be a connection.'))
+          return callback(errors.ReQLDriverError('First argument to `run` must be a connection.'))
         end
         return r._logger('First argument to `run` must be a connection.')
       end
@@ -457,153 +437,6 @@ DATUMTERM = ast(
 
 --[[AstClasses]]
 
-local Cursor = class(
-  'Cursor',
-  {
-    __init = function(self, conn, token, opts, root)
-      self._conn = conn
-      self._token = token
-      self._opts = opts
-      self._root = root -- current query
-      self._responses = {}
-      self._response_index = 1
-    end,
-    _add_response = function(self, response)
-      local t = response.t
-      if not self._type then self._type = response.n or true end
-      if response.r[1] or t == --[[Response.WAIT_COMPLETE]] then
-        table.insert(self._responses, response)
-      end
-      if t ~= --[[Response.SUCCESS_PARTIAL]] then
-        -- We got an error, SUCCESS_SEQUENCE, WAIT_COMPLETE, or a SUCCESS_ATOM
-        self._end_flag = true
-        self._conn:_del_query(self._token)
-      else
-        self._conn:_continue_query(self._token)
-      end
-      while (self._cb and self._responses[1]) do
-        self:_run_cb(self._cb)
-      end
-    end,
-    _run_cb = function(self, callback)
-      local cb = function(err, row)
-        return callback(err, row)
-      end
-      local response = self._responses[1]
-      -- Behavior varies considerably based on response type
-      -- Error responses are not discarded, and the error will be sent to all future callbacks
-      local t = response.t
-      if t == --[[Response.SUCCESS_ATOM]] or t == --[[Response.SUCCESS_PARTIAL]] or t == --[[Response.SUCCESS_SEQUENCE]] then
-        local err
-
-        local status, row = pcall(
-          recursively_convert_pseudotype,
-          response.r[self._response_index],
-          self._opts
-        )
-        if not status then
-          err = row
-          row = response.r[self._response_index]
-        end
-
-        self._response_index = self._response_index + 1
-
-        -- If we're done with this response, discard it
-        if not response.r[self._response_index] then
-          table.remove(self._responses, 1)
-          self._response_index = 1
-        end
-
-        return cb(err, row)
-      end
-      self:clear()
-      if t == --[[Response.COMPILE_ERROR]] then
-        return cb(ReQLCompileError(response.r[1], self._root, response.b))
-      elseif t == --[[Response.CLIENT_ERROR]] then
-        return cb(ReQLClientError(response.r[1], self._root, response.b))
-      elseif t == --[[Response.RUNTIME_ERROR]] then
-        return cb(ReQLRuntimeError(response.r[1], self._root, response.b))
-      elseif t == --[[Response.WAIT_COMPLETE]] then
-        return cb()
-      end
-      return cb(ReQLDriverError('Unknown response type ' .. t))
-    end,
-    set = function(self, callback)
-      self._cb = callback
-    end,
-    clear = function(self)
-      self._cb = nil
-    end,
-    -- Implement IterableResult
-    next = function(self, callback)
-      local cb = function(err, row)
-        return callback(err, row)
-      end
-      if self._cb then
-        return cb(ReQLDriverError('Use `cur:clear()` before `cur:next`.'))
-      end
-      -- Try to get a row out of the responses
-      while not self._responses[1] do
-        if self._end_flag then
-          return cb(ReQLDriverError('No more rows in the cursor.'))
-        end
-        self._conn:_get_response(self._token)
-      end
-      return self:_run_cb(cb)
-    end,
-    close = function(self, callback)
-      if not self._end_flag then
-        self._conn:_end_query(self._token)
-        self._end_flag = true
-      end
-      if callback then return callback() end
-    end,
-    each = function(self, callback, on_finished)
-      if type(callback) ~= 'function' then
-        return r._logger('First argument to each must be a function.')
-      end
-      if on_finished and type(on_finished) ~= 'function' then
-        return r._logger('Optional second argument to each must be a function.')
-      end
-      local cb = function(row)
-        return callback(row)
-      end
-      function next_cb(err, data)
-        if err then
-          if err.message == 'ReQLDriverError No more rows in the cursor.' then
-            err = nil
-          end
-          if on_finished then
-            return on_finished(err)
-          end
-        else
-          cb(data)
-          return self:next(next_cb)
-        end
-      end
-      return self:next(next_cb)
-    end,
-    to_array = function(self, callback)
-      if not self._type then self._conn:_get_response(self._token) end
-      if type(self._type) == 'number' then
-        return cb(ReQLDriverError('`to_array` is not available for feeds.'))
-      end
-      local cb = function(err, arr)
-        return callback(err, arr)
-      end
-      local arr = {}
-      return self:each(
-        function(row)
-          table.insert(arr, row)
-        end,
-        function(err)
-          return cb(err, arr)
-        end
-      )
-    end,
-  }
-)
-
 r.connect = class(
   'Connection',
   {
@@ -656,7 +489,7 @@ r.connect = class(
           buf, err, partial = self.raw_socket:receive(8)
           buf = buf or partial
           if not buf then
-            return cb(ReQLDriverError('Server dropped connection with message:  \'' .. status_str .. '\'\n' .. err))
+            return cb(errors.ReQLDriverError('Server dropped connection with message:  \'' .. status_str .. '\'\n' .. err))
           end
           self.buffer = self.buffer .. buf
           i, j = buf:find('\0')
@@ -668,11 +501,11 @@ r.connect = class(
               self.open = true
               return cb(nil, self)
             end
-            return cb(ReQLDriverError('Server dropped connection with message: \'' .. status_str .. '\''))
+            return cb(errors.ReQLDriverError('Server dropped connection with message: \'' .. status_str .. '\''))
           end
         end
       end
-      return cb(ReQLDriverError('Could not connect to ' .. self.host .. ':' .. self.port .. '.\n' .. err))
+      return cb(errors.ReQLDriverError('Could not connect to ' .. self.host .. ':' .. self.port .. '.\n' .. err))
     end,
     DEFAULT_HOST = 'localhost',
     DEFAULT_PORT = 28015,
@@ -775,7 +608,7 @@ r.connect = class(
         return callback(err)
       end
       if not self.open then
-        return cb(ReQLDriverError('Connection is closed.'))
+        return cb(errors.ReQLDriverError('Connection is closed.'))
       end
 
       -- Assign token
@@ -821,7 +654,7 @@ r.connect = class(
         return res
       end
       if not self.open then
-        cb(ReQLDriverError('Connection is closed.'))
+        cb(errors.ReQLDriverError('Connection is closed.'))
       end
 
       -- Assign token

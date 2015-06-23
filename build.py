@@ -104,6 +104,7 @@ def process(file_name):
 def main():
     print('building source')
 
+    process('reql/cursor')
     process('reql/pprint')
     process('rethinkdb')
 

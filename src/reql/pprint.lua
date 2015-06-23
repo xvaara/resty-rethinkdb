@@ -29,7 +29,7 @@ function intspallargs(args, optargs)
   return intsp(argrepr)
 end
 
-return class(
+local ReQLQueryPrinter = class(
   'ReQLQueryPrinter',
   {
     __init = function(self, term, frames)
@@ -165,3 +165,7 @@ return class(
     end
   }
 )
+
+return function(term, frames)
+  return ReQLQueryPrinter(term, frames):print_query()
+end
