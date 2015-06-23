@@ -1,4 +1,5 @@
 local class = require'reql/class'
+local pprint = require'reql/pprint'
 
 -- r is both the main export table for the module
 -- and a function that wraps a native Lua value in a ReQL datum
@@ -101,7 +102,7 @@ local TIME, TIMEZONE, TIME_OF_DAY, TO_EPOCH_TIME, TO_GEOJSON, TO_ISO8601
 local TO_JSON_STRING, TUESDAY, TYPE_OF, UNGROUP, UNION, UPCASE, UPDATE, UUID
 local VAR, WAIT, WEDNESDAY, WITHOUT, WITH_FIELDS, YEAR, ZIP
 local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
-local ReQLClientError, ReQLQueryPrinter, ReQLError
+local ReQLClientError, ReQLError
 
 function r.is_instance(obj, cls, ...)
   if cls == nil then return false end
@@ -170,41 +171,6 @@ setmetatable(r, {
     return DATUMTERM(val)
   end
 })
-
-function intsp(seq)
-  local res = {}
-  local sep = ''
-  for _, v in ipairs(seq) do
-    table.insert(res, {sep, v})
-    sep = ', '
-  end
-  return res
-end
-
-function kved(optargs)
-  local res = {'{'}
-  local sep = ''
-  for k, v in pairs(optargs) do
-    table.insert(res, {sep, k, ': ', v})
-    sep = ', '
-  end
-  table.insert(res, '}')
-  return res
-end
-
-function intspallargs(args, optargs)
-  local argrepr = {}
-  if next(args) then
-    table.insert(argrepr, intsp(args))
-  end
-  if optargs and next(optargs) then
-    if next(argrepr) then
-      table.insert(argrepr, ', ')
-    end
-    table.insert(argrepr, kved(optargs))
-  end
-  return argrepr
-end
 
 function get_opts(...)
   local args = {...}
@@ -311,7 +277,7 @@ ReQLError = class(
     self.msg = msg
     self.message = self.__class.__name .. ' ' .. msg
     if term then
-      self.message = self.message .. ' in:\n' .. ReQLQueryPrinter(term, frames):print_query()
+      self.message = self.message .. ' in:\n' .. pprint(term, frames):print_query()
     end
   end
 )
@@ -323,80 +289,6 @@ ReQLServerError = class('ReQLServerError', ReQLError, {})
 ReQLRuntimeError = class('ReQLRuntimeError', ReQLServerError, {})
 ReQLCompileError = class('ReQLCompileError', ReQLServerError, {})
 ReQLClientError = class('ReQLClientError', ReQLServerError, {})
-
-ReQLQueryPrinter = class(
-  'ReQLQueryPrinter',
-  {
-    __init = function(self, term, frames)
-      self.term = term
-      self.frames = frames
-    end,
-    print_query = function(self)
-      local carrots
-      if next(self.frames) then
-        carrots = self:compose_carrots(self.term, self.frames)
-      else
-        carrots = {self:carrotify(self:compose_term(self.term))}
-      end
-      carrots = self:join_tree(carrots):gsub('[^%^]', '')
-      return self:join_tree(self:compose_term(self.term)) .. '\n' .. carrots
-    end,
-    compose_term = function(self, term)
-      if type(term) ~= 'table' then return '' .. term end
-      local args = {}
-      for i, arg in ipairs(term.args) do
-        args[i] = self:compose_term(arg)
-      end
-      local optargs = {}
-      for key, arg in pairs(term.optargs) do
-        optargs[key] = self:compose_term(arg)
-      end
-      return term:compose(args, optargs)
-    end,
-    compose_carrots = function(self, term, frames)
-      local frame = table.remove(frames, 1)
-      local args = {}
-      for i, arg in ipairs(term.args) do
-        if frame == (i - 1) then
-          args[i] = self:compose_carrots(arg, frames)
-        else
-          args[i] = self:compose_term(arg)
-        end
-      end
-      local optargs = {}
-      for key, arg in pairs(term.optargs) do
-        if frame == key then
-          optargs[key] = self:compose_carrots(arg, frames)
-        else
-          optargs[key] = self:compose_term(arg)
-        end
-      end
-      if frame then
-        return term.compose(args, optargs)
-      end
-      return self:carrotify(term.compose(args, optargs))
-    end,
-    carrot_marker = {},
-    carrotify = function(self, tree)
-      return {carrot_marker, tree}
-    end,
-    join_tree = function(self, tree)
-      local str = ''
-      for _, term in ipairs(tree) do
-        if type(term) == 'table' then
-          if #term == 2 and term[1] == self.carrot_marker then
-            str = str .. self:join_tree(term[2]):gsub('.', '^')
-          else
-            str = str .. self:join_tree(term)
-          end
-        else
-          str = str .. term
-        end
-      end
-      return str
-    end
-  }
-)
 
 -- All top level exported functions
 
@@ -685,63 +577,6 @@ class_methods = {
     end
     return res
   end,
-  compose = function(self, args, optargs)
-    if self.tt == 2 then
-      return {
-        '{',
-        intsp(args),
-        '}'
-      }
-    end
-    if self.tt == 3 then
-      return kved(optargs)
-    end
-    if self.tt == 10 then
-      return {'var_' .. args[1]}
-    end
-    if self.tt == 155 and not self.args[1] then
-      return 'r.binary(<data>)'
-    end
-    if self.tt == 170 then
-      return {
-        args[1],
-        '(',
-        args[2],
-        ')'
-      }
-    end
-    if self.tt == 69 then
-      return {
-        'function(',
-        intsp((function()
-          local _accum_0 = {}
-          for i, v in ipairs(self.args[1]) do
-            _accum_0[i] = 'var_' .. v
-          end
-          return _accum_0
-        end)()),
-        ') return ',
-        args[2],
-        ' end'
-      }
-    end
-    if self.tt == 64 then
-      local func = table.remove(args, 1)
-      if func then
-        table.insert(args, func)
-      end
-    end
-    if not self.args then
-      return {
-        type(self)
-      }
-    end
-    return {
-      'r.' .. self.st .. '(',
-      intspallargs(args, optargs),
-      ')'
-    }
-  end,
   next_var_id = 0,
 }
 
@@ -795,12 +630,6 @@ DATUMTERM = ast(
     end,
     args = {},
     optargs = {},
-    compose = function(self)
-      if self.data == nil then
-        return 'nil'
-      end
-      return r._encode(self.data)
-    end,
     build = function(self)
       if self.data == nil then
         if not r.json_parser then
