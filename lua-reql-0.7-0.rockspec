@@ -1,9 +1,9 @@
 package = 'Lua-ReQL'
-version = '0.6-7'
+version = '0.7-0'
 
 source = {
   url = 'git://github.com/grandquista/Lua-ReQL',
-  tag = 'v0.6.7',
+  tag = 'v0.7.0',
 }
 
 description = {
@@ -15,7 +15,7 @@ description = {
 }
 
 dependencies = {
-  'lua > 5.1',
+  'lua >= 5.1',
   'luasocket ~> 3',
   'luajson ~> 1',
 }
@@ -28,5 +28,6 @@ build = {
     ['reql.cursor'] = 'src/reql/cursor.lua',
     ['reql.errors'] = 'src/reql/errors.lua',
     ['reql.pprint'] = 'src/reql/pprint.lua',
+    ['reql.util'] = 'src/reql/util.lua'
   }
 }
