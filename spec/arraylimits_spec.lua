@@ -80,7 +80,7 @@ describe('array limits', function()
             return arr
           end)
         end
-      ), {}
+      ), {r.json_parser.util.null}
     )
   end)
 

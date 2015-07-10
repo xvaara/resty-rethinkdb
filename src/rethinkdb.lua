@@ -1,3 +1,7 @@
+local class = require'reql/class'
+local Cursor = require'reql/cursor'
+local errors = require'reql/errors'
+
 -- r is both the main export table for the module
 -- and a function that wraps a native Lua value in a ReQL datum
 local r = {}
@@ -98,8 +102,6 @@ local SUM, SUNDAY, SYNC, TABLE, TABLE_CREATE, TABLE_DROP, TABLE_LIST, THURSDAY
 local TIME, TIMEZONE, TIME_OF_DAY, TO_EPOCH_TIME, TO_GEOJSON, TO_ISO8601
 local TO_JSON_STRING, TUESDAY, TYPE_OF, UNGROUP, UNION, UPCASE, UPDATE, UUID
 local VAR, WAIT, WEDNESDAY, WITHOUT, WITH_FIELDS, YEAR, ZIP
-local ReQLDriverError, ReQLServerError, ReQLRuntimeError, ReQLCompileError
-local ReQLClientError, ReQLQueryPrinter, ReQLError
 
 function r.is_instance(obj, cls, ...)
   if cls == nil then return false end
@@ -169,92 +171,6 @@ setmetatable(r, {
   end
 })
 
-function class(name, parent, base)
-  local index, init
-
-  if base == nil then
-    base = parent
-    parent = nil
-  end
-
-  if type(base) == 'function' then
-    base = {__init = base}
-  end
-
-  if parent and parent.__base then
-    setmetatable(base, parent.__base)
-  else
-    index = base
-  end
-
-  init = base.__init
-  base.__init = nil
-  base.__index = base
-
-  local _class_0 = setmetatable({
-    __name = name,
-    __init = init,
-    __base = base,
-    __parent = parent
-  }, {
-    __index = index or function(cls, name)
-      local val = rawget(base, name)
-      if val == nil then
-        return parent[name]
-      else
-        return val
-      end
-    end,
-    __call = function(cls, ...)
-      local self = setmetatable({}, cls.__base)
-      cls.__init(self, ...)
-      return self
-    end
-  })
-  base.__class = _class_0
-
-  if parent and parent.__inherited then
-    parent:__inherited(_class_0)
-  end
-
-  return _class_0
-end
-
-function intsp(seq)
-  local res = {}
-  local sep = ''
-  for _, v in ipairs(seq) do
-    table.insert(res, {sep, v})
-    sep = ', '
-  end
-  return res
-end
-
-function kved(optargs)
-  local res = {'{'}
-  local sep = ''
-  for k, v in pairs(optargs) do
-    table.insert(res, {sep, k, ': ', v})
-    sep = ', '
-  end
-  table.insert(res, '}')
-  return res
-end
-
-function intspallargs(args, optargs)
-  local argrepr = {}
-  if next(args) then
-    table.insert(argrepr, intsp(args))
-  end
-  if optargs and next(optargs) then
-    if next(argrepr) then
-      table.insert(argrepr, ', ')
-    end
-    table.insert(argrepr, kved(optargs))
-  end
-  return argrepr
-end
-
 function get_opts(...)
   local args = {...}
   local opt = {}
@@ -294,7 +210,7 @@ function convert_pseudotype(obj, opts)
     local time_format = opts.time_format
     if 'native' == time_format or not time_format then
       if not (obj['epoch_time']) then
-        return r._logger(ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
+        return r._logger(errors.ReQLDriverError('pseudo-type TIME ' .. obj .. ' table missing expected field `epoch_time`.'))
       end
 
       -- We ignore the timezone field of the pseudo-type TIME table. JS dates do not support timezones.
@@ -305,7 +221,7 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == time_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown time_format run option ' .. opts.time_format .. '.'))
     end
   elseif 'GROUPED_DATA' == reql_type then
     local group_format = opts.group_format
@@ -324,19 +240,19 @@ function convert_pseudotype(obj, opts)
     elseif 'raw' == group_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown group_format run option ' .. opts.group_format .. '.'))
     end
   elseif 'BINARY' == reql_type then
     local binary_format = opts.binary_format
     if 'native' == binary_format or not binary_format then
       if not obj.data then
-        return r._logger(ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
+        return r._logger(errors.ReQLDriverError('pseudo-type BINARY table missing expected field `data`.'))
       end
       return r._unb64(obj.data)
     elseif 'raw' == binary_format then
       return obj
     else
-      return r._logger(ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
+      return r._logger(errors.ReQLDriverError('Unknown binary_format run option ' .. opts.binary_format .. '.'))
     end
   else
     -- Regular table or unknown pseudo type
@@ -353,99 +269,6 @@ function recursively_convert_pseudotype(obj, opts)
   end
   return obj
 end
-
-ReQLError = class(
-  'ReQLError',
-  function(self, msg, term, frames)
-    self.msg = msg
-    self.message = self.__class.__name .. ' ' .. msg
-    if term then
-      self.message = self.message .. ' in:\n' .. ReQLQueryPrinter(term, frames):print_query()
-    end
-  end
-)
-
-ReQLDriverError = class('ReQLDriverError', ReQLError, {})
-
-ReQLServerError = class('ReQLServerError', ReQLError, {})
-
-ReQLRuntimeError = class('ReQLRuntimeError', ReQLServerError, {})
-ReQLCompileError = class('ReQLCompileError', ReQLServerError, {})
-ReQLClientError = class('ReQLClientError', ReQLServerError, {})
-
-ReQLQueryPrinter = class(
-  'ReQLQueryPrinter',
-  {
-    __init = function(self, term, frames)
-      self.term = term
-      self.frames = frames
-    end,
-    print_query = function(self)
-      local carrots
-      if next(self.frames) then
-        carrots = self:compose_carrots(self.term, self.frames)
-      else
-        carrots = {self:carrotify(self:compose_term(self.term))}
-      end
-      carrots = self:join_tree(carrots):gsub('[^%^]', '')
-      return self:join_tree(self:compose_term(self.term)) .. '\n' .. carrots
-    end,
-    compose_term = function(self, term)
-      if type(term) ~= 'table' then return '' .. term end
-      local args = {}
-      for i, arg in ipairs(term.args) do
-        args[i] = self:compose_term(arg)
-      end
-      local optargs = {}
-      for key, arg in pairs(term.optargs) do
-        optargs[key] = self:compose_term(arg)
-      end
-      return term:compose(args, optargs)
-    end,
-    compose_carrots = function(self, term, frames)
-      local frame = table.remove(frames, 1)
-      local args = {}
-      for i, arg in ipairs(term.args) do
-        if frame == (i - 1) then
-          args[i] = self:compose_carrots(arg, frames)
-        else
-          args[i] = self:compose_term(arg)
-        end
-      end
-      local optargs = {}
-      for key, arg in pairs(term.optargs) do
-        if frame == key then
-          optargs[key] = self:compose_carrots(arg, frames)
-        else
-          optargs[key] = self:compose_term(arg)
-        end
-      end
-      if frame then
-        return term.compose(args, optargs)
-      end
-      return self:carrotify(term.compose(args, optargs))
-    end,
-    carrot_marker = {},
-    carrotify = function(self, tree)
-      return {carrot_marker, tree}
-    end,
-    join_tree = function(self, tree)
-      local str = ''
-      for _, term in ipairs(tree) do
-        if type(term) == 'table' then
-          if #term == 2 and term[1] == self.carrot_marker then
-            str = str .. self:join_tree(term[2]):gsub('.', '^')
-          else
-            str = str .. self:join_tree(term)
-          end
-        else
-          str = str .. term
-        end
-      end
-      return str
-    end
-  }
-)
 
 -- All top level exported functions
 
@@ -472,7 +295,7 @@ ast_methods = {
         connection = r._pool
       else
         if callback then
-          return callback(ReQLDriverError('First argument to `run` must be a connection.'))
+          return callback(errors.ReQLDriverError('First argument to `run` must be a connection.'))
         end
         return r._logger('First argument to `run` must be a connection.')
       end
@@ -734,63 +557,6 @@ class_methods = {
     end
     return res
   end,
-  compose = function(self, args, optargs)
-    if self.tt == 2 then
-      return {
-        '{',
-        intsp(args),
-        '}'
-      }
-    end
-    if self.tt == 3 then
-      return kved(optargs)
-    end
-    if self.tt == 10 then
-      return {'var_' .. args[1]}
-    end
-    if self.tt == 155 and not self.args[1] then
-      return 'r.binary(<data>)'
-    end
-    if self.tt == 170 then
-      return {
-        args[1],
-        '(',
-        args[2],
-        ')'
-      }
-    end
-    if self.tt == 69 then
-      return {
-        'function(',
-        intsp((function()
-          local _accum_0 = {}
-          for i, v in ipairs(self.args[1]) do
-            _accum_0[i] = 'var_' .. v
-          end
-          return _accum_0
-        end)()),
-        ') return ',
-        args[2],
-        ' end'
-      }
-    end
-    if self.tt == 64 then
-      local func = table.remove(args, 1)
-      if func then
-        table.insert(args, func)
-      end
-    end
-    if not self.args then
-      return {
-        type(self)
-      }
-    end
-    return {
-      'r.' .. self.st .. '(',
-      intspallargs(args, optargs),
-      ')'
-    }
-  end,
   next_var_id = 0,
 }
 
@@ -844,12 +610,6 @@ DATUMTERM = ast(
     end,
     args = {},
     optargs = {},
-    compose = function(self)
-      if self.data == nil then
-        return 'nil'
-      end
-      return r._encode(self.data)
-    end,
     build = function(self)
       if self.data == nil then
         if not r.json_parser then
@@ -1042,153 +802,6 @@ WITH_FIELDS = ast('WITH_FIELDS', {tt = 96, st = 'with_fields'})
 YEAR = ast('YEAR', {tt = 128, st = 'year'})
 ZIP = ast('ZIP', {tt = 72, st = 'zip'})
 
-local Cursor = class(
-  'Cursor',
-  {
-    __init = function(self, conn, token, opts, root)
-      self._conn = conn
-      self._token = token
-      self._opts = opts
-      self._root = root -- current query
-      self._responses = {}
-      self._response_index = 1
-    end,
-    _add_response = function(self, response)
-      local t = response.t
-      if not self._type then self._type = response.n or true end
-      if response.r[1] or t == 4 then
-        table.insert(self._responses, response)
-      end
-      if t ~= 3 then
-        -- We got an error, SUCCESS_SEQUENCE, WAIT_COMPLETE, or a SUCCESS_ATOM
-        self._end_flag = true
-        self._conn:_del_query(self._token)
-      else
-        self._conn:_continue_query(self._token)
-      end
-      while (self._cb and self._responses[1]) do
-        self:_run_cb(self._cb)
-      end
-    end,
-    _run_cb = function(self, callback)
-      local cb = function(err, row)
-        return callback(err, row)
-      end
-      local response = self._responses[1]
-      -- Behavior varies considerably based on response type
-      -- Error responses are not discarded, and the error will be sent to all future callbacks
-      local t = response.t
-      if t == 1 or t == 3 or t == 2 then
-        local err
-
-        local status, row = pcall(
-          recursively_convert_pseudotype,
-          response.r[self._response_index],
-          self._opts
-        )
-        if not status then
-          err = row
-          row = response.r[self._response_index]
-        end
-
-        self._response_index = self._response_index + 1
-
-        -- If we're done with this response, discard it
-        if not response.r[self._response_index] then
-          table.remove(self._responses, 1)
-          self._response_index = 1
-        end
-
-        return cb(err, row)
-      end
-      self:clear()
-      if t == 17 then
-        return cb(ReQLCompileError(response.r[1], self._root, response.b))
-      elseif t == 16 then
-        return cb(ReQLClientError(response.r[1], self._root, response.b))
-      elseif t == 18 then
-        return cb(ReQLRuntimeError(response.r[1], self._root, response.b))
-      elseif t == 4 then
-        return cb()
-      end
-      return cb(ReQLDriverError('Unknown response type ' .. t))
-    end,
-    set = function(self, callback)
-      self._cb = callback
-    end,
-    clear = function(self)
-      self._cb = nil
-    end,
-    -- Implement IterableResult
-    next = function(self, callback)
-      local cb = function(err, row)
-        return callback(err, row)
-      end
-      if self._cb then
-        return cb(ReQLDriverError('Use `cur:clear()` before `cur:next`.'))
-      end
-      -- Try to get a row out of the responses
-      while not self._responses[1] do
-        if self._end_flag then
-          return cb(ReQLDriverError('No more rows in the cursor.'))
-        end
-        self._conn:_get_response(self._token)
-      end
-      return self:_run_cb(cb)
-    end,
-    close = function(self, callback)
-      if not self._end_flag then
-        self._conn:_end_query(self._token)
-        self._end_flag = true
-      end
-      if callback then return callback() end
-    end,
-    each = function(self, callback, on_finished)
-      if type(callback) ~= 'function' then
-        return r._logger('First argument to each must be a function.')
-      end
-      if on_finished and type(on_finished) ~= 'function' then
-        return r._logger('Optional second argument to each must be a function.')
-      end
-      local cb = function(row)
-        return callback(row)
-      end
-      function next_cb(err, data)
-        if err then
-          if err.message == 'ReQLDriverError No more rows in the cursor.' then
-            err = nil
-          end
-          if on_finished then
-            return on_finished(err)
-          end
-        else
-          cb(data)
-          return self:next(next_cb)
-        end
-      end
-      return self:next(next_cb)
-    end,
-    to_array = function(self, callback)
-      if not self._type then self._conn:_get_response(self._token) end
-      if type(self._type) == 'number' then
-        return cb(ReQLDriverError('`to_array` is not available for feeds.'))
-      end
-      local cb = function(err, arr)
-        return callback(err, arr)
-      end
-      local arr = {}
-      return self:each(
-        function(row)
-          table.insert(arr, row)
-        end,
-        function(err)
-          return cb(err, arr)
-        end
-      )
-    end,
-  }
-)
-
 r.connect = class(
   'Connection',
   {
@@ -1241,7 +854,7 @@ r.connect = class(
           buf, err, partial = self.raw_socket:receive(8)
           buf = buf or partial
           if not buf then
-            return cb(ReQLDriverError('Server dropped connection with message:  \'' .. status_str .. '\'\n' .. err))
+            return cb(errors.ReQLDriverError('Server dropped connection with message:  \'' .. status_str .. '\'\n' .. err))
           end
           self.buffer = self.buffer .. buf
           i, j = buf:find('\0')
@@ -1253,11 +866,11 @@ r.connect = class(
               self.open = true
               return cb(nil, self)
             end
-            return cb(ReQLDriverError('Server dropped connection with message: \'' .. status_str .. '\''))
+            return cb(errors.ReQLDriverError('Server dropped connection with message: \'' .. status_str .. '\''))
           end
         end
       end
-      return cb(ReQLDriverError('Could not connect to ' .. self.host .. ':' .. self.port .. '.\n' .. err))
+      return cb(errors.ReQLDriverError('Could not connect to ' .. self.host .. ':' .. self.port .. '.\n' .. err))
     end,
     DEFAULT_HOST = 'localhost',
     DEFAULT_PORT = 28015,
@@ -1360,7 +973,7 @@ r.connect = class(
         return callback(err)
       end
       if not self.open then
-        return cb(ReQLDriverError('Connection is closed.'))
+        return cb(errors.ReQLDriverError('Connection is closed.'))
       end
 
       -- Assign token
@@ -1406,7 +1019,7 @@ r.connect = class(
         return res
       end
       if not self.open then
-        cb(ReQLDriverError('Connection is closed.'))
+        cb(errors.ReQLDriverError('Connection is closed.'))
       end
 
       -- Assign token
