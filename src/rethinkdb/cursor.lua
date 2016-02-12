@@ -1,3 +1,6 @@
+local errors = require'rethinkdb.errors'
+local proto = require'rethinkdb.protodef'
+
 return require('rethinkdb.class')(
   'Cursor',
   {
@@ -28,10 +31,10 @@ return require('rethinkdb.class')(
           self._type = 'finite'
         end
       end
-      if response.r[1] or t == 4 then
+      if response.r[1] or t == proto.Response.WAIT_COMPLETE then
         table.insert(self._responses, response)
       end
-      if t ~= 3 then
+      if t ~= proto.Response.SUCCESS_PARTIAL then
         -- We got an error, SUCCESS_SEQUENCE, WAIT_COMPLETE, or a SUCCESS_ATOM
         self._end_flag = true
         self.delete()
@@ -45,7 +48,7 @@ return require('rethinkdb.class')(
       -- Behavior varies considerably based on response type
       -- Error responses are not discarded, and the error will be sent to all future callbacks
       local t = response.t
-      if t == 1 or t == 3 or t == 2 then
+      if t == proto.Response.SUCCESS_ATOM or t == proto.Response.SUCCESS_PARTIAL or t == proto.Response.SUCCESS_SEQUENCE then
         local err
         local status, row = self.convert_pseudotype(response)
         if not status then
@@ -59,23 +62,23 @@ return require('rethinkdb.class')(
         return cb(err, row)
       end
       self:set()
-      if t == 17 then
-        return cb(ReQLCompileError(response.r[1], self._root, response.b))
-      elseif t == 16 then
-        return cb(ReQLClientError(response.r[1], self._root, response.b))
-      elseif t == 18 then
-        return cb(ReQLRuntimeError(response.r[1], self._root, response.b))
-      elseif t == 4 then
+      if t == proto.Response.COMPILE_ERROR then
+        return cb(errors.ReQLCompileError(response.r[1], self._root, response.b))
+      elseif t == proto.Response.CLIENT_ERROR then
+        return cb(errors.ReQLClientError(response.r[1], self._root, response.b))
+      elseif t == proto.Response.RUNTIME_ERROR then
+        return cb(errors.ReQLRuntimeError(response.r[1], self._root, response.b))
+      elseif t == proto.Response.WAIT_COMPLETE then
         return cb()
       end
-      return cb(ReQLDriverError('Unknown response type ' .. t))
+      return cb(errors.ReQLDriverError('Unknown response type ' .. t))
     end,
     set = function(self, cb)
       self._cb = cb
     end,
     next = function(self, cb)
       if self._end_flag then
-        return cb(ReQLDriverError('No more rows in the cursor.'))
+        return cb(errors.ReQLDriverError('No more rows in the cursor.'))
       end
       local _cb = self._cb
       --set(function(err, res)
