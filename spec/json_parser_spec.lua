@@ -16,7 +16,7 @@ if enable then
       if err then error(err.message) end
 
       r.db_create(reql_db):run(c)
-      c:use(reql_db)
+      c.use(reql_db)
       r.table_create(reql_table):run(c)
     end)
 
@@ -29,13 +29,13 @@ if enable then
       r.table(reql_table):delete():run(c)
     end)
 
-    function test(name, query, res)
+    local function test(name, query, res)
       it(name, function()
         assert.equal(r.json_parser, dkjson)
         assert.same(res, query:run(
           c, function(err, cur)
             if err then error(err.message) end
-            return cur:to_array(function(err, arr)
+            return cur.to_array(function(err, arr)
               if err then error(err.message) end
               return arr
             end)

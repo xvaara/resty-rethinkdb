@@ -1,8 +1,8 @@
 package = 'Lua-ReQL'
-version = '0.7-0'
+version = '1.0-0'
 source = {
   url = 'git://github.com/grandquista/Lua-ReQL',
-  tag = 'v0.7.0',
+  tag = 'v1.0.0',
 }
 description = {
   summary = 'A Lua driver for RethinkDB.',
@@ -12,16 +12,23 @@ description = {
 dependencies = {
   'lua >= 5.1',
   'luasocket ~> 3',
+  'luasec',
   'luajson ~> 1',
 }
 build = {
   type = 'builtin',
   modules = {
     ['rethinkdb.ast'] = 'src/rethinkdb/ast.lua',
-    ['rethinkdb.class'] = 'src/rethinkdb/class.lua',
+    ['rethinkdb.bytes_to_int'] = 'src/rethinkdb/bytes_to_int.lua',
+    ['rethinkdb.connection_instance'] = 'src/rethinkdb/connection_instance.lua',
+    ['rethinkdb.connection'] = 'src/rethinkdb/connection.lua',
     ['rethinkdb.convert_pseudotype'] = 'src/rethinkdb/convert_pseudotype.lua',
     ['rethinkdb.cursor'] = 'src/rethinkdb/cursor.lua',
+    ['rethinkdb.errors'] = 'src/rethinkdb/errors.lua',
+    ['rethinkdb.int_to_bytes'] = 'src/rethinkdb/int_to_bytes.lua',
     ['rethinkdb.is_instance'] = 'src/rethinkdb/is_instance.lua',
+    ['rethinkdb.pool'] = 'src/rethinkdb/pool.lua',
+    ['rethinkdb.protodef'] = 'src/rethinkdb/protodef.lua',
     rethinkdb = 'src/rethinkdb.lua'
   }
 }
