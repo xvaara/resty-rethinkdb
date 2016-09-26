@@ -1,41 +1,33 @@
+--- Interface
+-- @module rethinkdb.connection
+-- @author Adam Grandquist
+-- @license Apache
+-- @copyright Adam Grandquist 2016
+
 local m = {}
 
-local DEFAULT_HOST = 'localhost'
-local DEFAULT_PORT = 28015
-local DEFAULT_USER = 'admin'
-local DEFAULT_AUTH_KEY = ''
-local DEFAULT_TIMEOUT = 20 -- In seconds
-
-function m.init(_r)
-  local current_protocol = require'rethinkdb.current_protocol'.init(_r)
-  local instance = require'rethinkdb.connection_instance'.init(_r)
-
-  return function(opts, _proto_version)
-    local port = opts.port or DEFAULT_PORT
-    local db = opts.db -- left nil if this is not set
-    local auth_key = opts.password or opts.auth_key or DEFAULT_AUTH_KEY
-    local user = opts.user or DEFAULT_USER
-    local timeout = opts.timeout or DEFAULT_TIMEOUT
-    local ssl_params = opts.ssl
-    local proto_version = _proto_version or current_protocol
-    local host = opts.host or DEFAULT_HOST
-
-    local function connect(callback)
-      return instance(
-        auth_key, db, host, port, proto_version, ssl_params, timeout, user
-        ).connect(callback)
+function m.init(r)
+  --- Create a new connection to the database server. Accepts the following
+  -- options.
+  -- - host: the host to connect to (default localhost).
+  -- - port: the port to connect on (default 28015).
+  -- - db: the default database (default test).
+  -- - auth_key: the authentication key (default '' empty string). __ depreciated __
+  -- - password: replaces auth_key option.
+  -- - proto_version: the handshake implementation to use (default r.proto_V1_0).
+  -- - ssl: options passed to luacrypto ssl.wrap
+  -- - timeout: max timeout in seconds for a network operation (default 20).
+  -- - user: the user name for database (default admin).
+  -- If the connection cannot be established, a ReQLDriverError will be sent to
+  -- the callback.
+  function r.connect(host, callback)
+    if type(host) == 'function' then
+      callback = host
+      host = {}
+    elseif type(host) == 'string' then
+      host = {host = host}
     end
-
-    return {
-      __name = 'Connection',
-      _start = function(...)
-        return connect()._start(...)
-      end,
-      connect = connect,
-      use = function(_db)
-        db = _db
-      end
-    }
+    return r.connector(host or {}).connect(callback)
   end
 end
 

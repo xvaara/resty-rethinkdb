@@ -1,275 +1,318 @@
-local bytes_to_int = require'rethinkdb.bytes_to_int'
-local Cursor = require'rethinkdb.cursor'
+--- Interface for concrete connections.
+-- @module rethinkdb.connection_instance
+-- @author Adam Grandquist
+-- @license Apache
+-- @copyright Adam Grandquist 2016
+
+local cursor = require'rethinkdb.cursor'
 local errors = require'rethinkdb.errors'
-local int_to_bytes = require'rethinkdb.int_to_bytes'
-local proto = require'rethinkdb.protodef'
+local ltn12 = require('ltn12')
+local protocol = require'rethinkdb.internal.protocol'
+local protect = require'rethinkdb.internal.protect'
+local socket = require'rethinkdb.internal.socket'
 
-local m = {}
+local unpack = _G.unpack or table.unpack
 
-function m.init(_r)
-  local Socket = require'rethinkdb.socket'.init(_r)
+local conn_inst_meta_table = {}
 
-  return function(auth_key, db, host, port, proto_version, ssl_params, timeout, user)
-    local raw_socket = Socket(host, port, ssl_params, timeout)
-    local outstanding_callbacks = {}
-    local next_token = 1
-    local buffer = ''
-
-    local function write_socket(token, query)
-      local data = _r.encode(query)
-      return raw_socket.send(
-        int_to_bytes(token, 8),
-        int_to_bytes(#data, 4),
-        data
-      )
-    end
-
-    local function continue_query(token)
-      return write_socket(token, {proto.Query.CONTINUE})
-    end
-
-    local function del_query(token)
-      -- This query is done, delete this cursor
-      if not outstanding_callbacks[token] then return end
-      outstanding_callbacks[token].cursor = nil
-    end
-
-    local function end_query(token)
-      del_query(token)
-      return write_socket(token, {proto.Query.STOP})
-    end
-
-    local function process_response(response, token)
-      local cursor = outstanding_callbacks[token]
-      if not cursor then
-        -- Unexpected token
-        return _r.logger('Unexpected token ' .. token .. '.')
-      end
-      local add_response = cursor.add_response
-      cursor = cursor.cursor
-      if cursor then
-        return add_response(response)
-      end
-    end
-
-    local instance = {
-      __name = 'ConnInstance',
-      open = raw_socket.isOpen,
-      use = function(_db)
-        db = _db
-      end
-    }
-
-    local function get_response(reqest_token)
-      local response_length = 0
-      local token = 0
-      -- Buffer data, execute return results if need be
-      while true do
-        local buf, err = raw_socket.recv()
-        if err then
-          instance.close({noreply_wait = false})
-          return process_response(
-            {
-              t = proto.Response.CLIENT_ERROR,
-              r = {'connection returned: ' .. err},
-              b = {}
-            },
-            reqest_token
-          )
-        end
-        buffer = buffer .. buf
-        if response_length > 0 then
-          if #(buffer) >= response_length then
-            local response_buffer = string.sub(buffer, 1, response_length)
-            buffer = string.sub(buffer, response_length + 1)
-            response_length = 0
-            continue_query(token)
-            process_response(_r.decode(response_buffer), token)
-            if token == reqest_token then return end
-          end
-        else
-          if #(buffer) >= 12 then
-            token = bytes_to_int(buffer:sub(1, 8))
-            response_length = bytes_to_int(buffer:sub(9, 12))
-            buffer = buffer:sub(13)
-          end
-        end
-      end
-    end
-
-    local function make_cursor(token, opts, term)
-      local cursor, add_response = Cursor(
-         del_query, end_query, get_response, token, opts or {}, term)
-
-      -- Save cursor
-
-      outstanding_callbacks[token] = {
-        cursor = cursor,
-        add_response = add_response
-      }
-
-      return cursor
-    end
-
-    function instance._start(term, callback, opts)
-      local cb = function(err, cur)
-        local res
-        if type(callback) == 'function' then
-          res = callback(err, cur)
-        else
-          if err then
-            return _r.logger(err.message)
-          end
-        end
-        cur.close()
-        return res
-      end
-      if not instance.open() then
-        return cb(errors.ReQLDriverError('Connection is closed.'))
-      end
-
-      -- Assign token
-      local token = next_token
-      next_token = next_token + 1
-
-      -- Set global options
-      local global_opts = {}
-
-      for k, v in pairs(opts) do
-        global_opts[k] = _r(v):build()
-      end
-
-      if opts.db then
-        global_opts.db = opts.db:db():build()
-      elseif db then
-        global_opts.db = _r(db):db():build()
-      end
-
-      if type(callback) ~= 'function' then
-        global_opts.noreply = true
-      end
-
-      -- Construct query
-      local query = {proto.Query.START, term:build(), global_opts}
-
-      local _, err = write_socket(token, query)
-
-      if err then
-        instance.close({noreply_wait = false}, function(_err)
-          return cb(_err or errors.ReQLDriverError('Connection is closed.'))
-        end)
-      end
-
-      return cb(nil, make_cursor(token, opts, term))
-    end
-
-    function instance.close(opts_or_callback, callback)
-      local opts = {}
-      if callback then
-        if type(opts_or_callback) ~= 'table' then
-          return error('First argument to two-argument `close` must be a table.')
-        end
-        opts = opts_or_callback
-      elseif type(opts_or_callback) == 'table' then
-        opts = opts_or_callback
-      elseif type(opts_or_callback) == 'function' then
-        callback = opts_or_callback
-      end
-
-      local function cb(err)
-        raw_socket.close()
-        if callback then
-          return callback(err)
-        end
-        return nil, err
-      end
-
-      local noreply_wait = (opts.noreply_wait ~= false) and instance.open()
-
-      if noreply_wait then
-        return noreply_wait(cb)
-      end
-      return cb()
-    end
-
-    function instance.connect(callback)
-      return instance.close({noreply_wait = false}, function()
-        raw_socket.open()
-
-        local err
-
-        buffer, err = proto_version(raw_socket, auth_key, user)
-
-        err = errors.ReQLDriverError('Could not connect to ' .. host .. ':' .. port .. '.\n' .. err)
-
-        if callback then
-          local res = callback(err, instance)
-          instance.close({noreply_wait = false})
-          return res
-        end
-        return instance, err
-      end)
-    end
-
-    function instance.noreply_wait(callback)
-      local cb = function(_err, _cur)
-        if _cur then
-          return _cur.next(function(err)
-            return callback(err)
-          end)
-        end
-        return callback(_err)
-      end
-      if not instance.open() then
-        return cb(errors.ReQLDriverError('Connection is closed.'))
-      end
-
-      -- Assign token
-      local token = next_token
-      next_token = next_token + 1
-
-      local cursor = make_cursor(token)
-
-      -- Construct query
-      write_socket(token, {proto.Query.NOREPLY_WAIT})
-
-      return cb(nil, cursor)
-    end
-
-    function instance.reconnect(opts_or_callback, callback)
-      local opts = {}
-      if callback or not type(opts_or_callback) == 'function' then
-        opts = opts_or_callback
-      else
-        callback = opts_or_callback
-      end
-      return instance.close(opts, function()
-        return instance.connect(callback)
-      end)
-    end
-
-    function instance.server()
-      if not instance.open() then
-        return nil, errors.ReQLDriverError('Connection is closed.')
-      end
-
-      -- Assign token
-      local token = next_token
-      next_token = next_token + 1
-
-      local cursor = make_cursor(token)
-
-      -- Construct query
-      write_socket(token, {proto.Query.SERVER_INFO})
-
-      return cursor.next(function(err, res)
-        if err then return nil, err end
-        return res
-      end)
-    end
-
-    return instance
-  end
+function conn_inst_meta_table.__tostring(conn_inst)
+  return (
+    conn_inst.is_open() and 'open' or 'closed'
+  ) .. ' rethinkdb connection to ' .. conn_inst.host .. ':' .. conn_inst.port
 end
 
-return m
+local function connection_instance(r, handshake_inst, host, port, ssl_params, timeout)
+  local db = nil
+  local outstanding_callbacks = {}
+  local protocol_inst = nil
+  local responses = {}
+
+  local function reset(err)
+    if protocol_inst then protocol_inst.close() end
+    protocol_inst = nil
+    for _, state in pairs(outstanding_callbacks) do
+      state.open = nil
+    end
+    outstanding_callbacks = {}
+    if type(err) == 'string' then
+      return nil, errors.ReQLDriverError(r, err)
+    end
+    return nil, err
+  end
+
+  local conn_inst = setmetatable(
+    {host = host, port = port, r = r}, conn_inst_meta_table)
+
+  function conn_inst.is_open()
+    return protocol_inst and true or false
+  end
+
+  --- Change the default database on this connection.
+  function conn_inst.use(_db)
+    if _db then
+      db = conn_inst.r.reql.db(_db)
+    else
+      db = nil
+    end
+  end
+
+  local function add_response(token, response, state)
+    protocol_inst.continue_query(token)
+
+    local err
+    response, err = protect(conn_inst.r.decode, response)
+    if not response then
+      return reset(err)
+    end
+
+    state.add_response(response)
+    return true
+  end
+
+  local function sink(chunk, err)
+    if not chunk then
+      return nil, err
+    end
+    local token, response = unpack(chunk)
+    if token then
+      local state = outstanding_callbacks[token]
+      if not state then
+        return true
+      end
+      if state.outstanding_callback then
+        local success, result = add_response(token, response, state)
+        if not success then
+          return nil, result
+        end
+        return true
+      end
+      responses[token] = response
+    end
+    return true
+  end
+
+  local function make_cursor(token, options, reql_inst)
+    local state = {open = true}
+
+    function state.del_query()
+      -- This query is done, delete this cursor
+      outstanding_callbacks[token] = nil
+      responses[token] = nil
+      state.open = nil
+    end
+
+    function state.end_query()
+      if protocol_inst then
+        return protocol_inst.end_query(token)
+      end
+    end
+
+    function state.maybe_response()
+      if responses[token] then
+        local response = nil
+        response, responses[token] = responses[token], response
+
+        return add_response(token, response, state)
+      end
+      return true
+    end
+
+    function state.step()
+      -- Buffer data, execute return results if need be
+      while not responses[token] do
+        local success, err = ltn12.pump.step(protocol_inst.source(conn_inst.r), sink)
+        if not success then
+          return reset(err)
+        end
+      end
+      return state.maybe_response()
+    end
+
+    -- Save cursor shared state
+    outstanding_callbacks[token] = state
+
+    return cursor(conn_inst.r, state, options, reql_inst)
+  end
+
+  function conn_inst._start(reql_inst, options, callback)
+    local function cb(err, cur)
+      if type(callback) == 'function' then
+        if cur then
+          local res = {callback(err, cur)}
+          cur.close()
+          return unpack(res)
+        end
+        return callback(err)
+      end
+      return cur, err
+    end
+    if not conn_inst.is_open() then return cb(errors.ReQLDriverError(r, 'Connection is closed.')) end
+
+    -- Set global options
+    local global_opts = {}
+
+    for first, second in pairs(options) do
+      local data, err = conn_inst.r.reql(second)
+      if not data then
+        return cb(err)
+      end
+      global_opts[first] = data
+    end
+
+    if options.db then
+      global_opts.db = conn_inst.r.reql.db(global_opts.db)
+    elseif db then
+      global_opts.db = db
+    end
+
+    -- Construct query
+    local token, err = protocol_inst.send_query(conn_inst.r, reql_inst, global_opts)
+
+    if err then
+      return cb(err)
+    end
+
+    if options.noreply then
+      return true
+    end
+
+    return cb(nil, make_cursor(token, options, reql_inst))
+  end
+
+  --- Close an open connection. Accepts the following options.
+  -- - noreply_wait: whether to wait for noreply writes to complete before
+  --   closing (default true). If this is set to false, some outstanding noreply
+  --   writes may be aborted. Has no effect if connection is already closing.
+  -- Closing a connection waits until all outstanding requests have finished and
+  -- then frees any open resources associated with the connection. If
+  -- noreply_wait is set to false, all outstanding requests are canceled
+  -- immediately.
+  function conn_inst.close(opts_or_callback, callback)
+    local opts = {}
+    if callback or type(opts_or_callback) == 'table' then
+      opts = opts_or_callback
+    elseif type(opts_or_callback) == 'function' then
+      callback = opts_or_callback
+    end
+
+    local noreply_wait = (opts.noreply_wait ~= false) and conn_inst.is_open()
+
+    if noreply_wait then
+      conn_inst.noreply_wait()
+    end
+
+    reset()
+
+    if callback then
+      return callback()
+    end
+  end
+
+  function conn_inst.connect(callback)
+    local socket_inst, err = socket(conn_inst.r, conn_inst.host, conn_inst.port, ssl_params, timeout)
+
+    if not socket_inst then
+      return reset(err)
+    end
+
+    local init_success
+
+    init_success, err = handshake_inst(conn_inst.r, socket_inst)
+
+    if not init_success then
+      if type(err) == 'table' then
+        if 10 <= err.error_code and err.error_code <= 20 then
+          return reset(errors.ReQLAuthError(r, err.error))
+        end
+        return reset(err.error)
+      end
+      return reset(err)
+    end
+
+    protocol_inst, err = protocol(socket_inst)
+
+    if not protocol_inst then
+      return reset(err)
+    end
+
+    if callback then
+      local function with(...)
+        reset()
+        return ...
+      end
+      return with(callback(nil, conn_inst))
+    end
+
+    return conn_inst
+  end
+
+  --- noreply_wait ensures that previous queries with the noreply flag have been
+  -- processed by the server. Note that this guarantee only applies to queries
+  -- run on the given connection.
+  function conn_inst.noreply_wait(callback)
+    local function cb(err, success)
+      if callback then
+        return callback(err, success)
+      end
+      if err then
+        return reset(err)
+      end
+      return success
+    end
+    if not conn_inst.is_open() then return cb(errors.ReQLDriverError(r, 'Connection is closed.')) end
+
+    -- Construct query
+    local token, err = protocol_inst.noreply_wait()
+
+    if not token then
+      return cb(err)
+    end
+
+    local _, e = make_cursor(token, {}, {}).to_array()
+    if e then
+      return cb(e)
+    end
+    return cb(nil, true)
+  end
+
+  --- Close and reopen a connection. Accepts the following options.
+  -- - noreply_wait. whether to wait for noreply writes to complete before
+  --   closing (default true). If this is set to false, some outstanding noreply
+  --   writes may be aborted. Has no effect if connection is already closing.
+  function conn_inst.reconnect(opts_or_callback, callback)
+    local opts = {}
+    if callback or not type(opts_or_callback) == 'function' then
+      opts = opts_or_callback
+    else
+      callback = opts_or_callback
+    end
+    conn_inst.close(opts)
+    return conn_inst.connect(callback)
+  end
+
+  function conn_inst.server(callback)
+    local function cb(err, ...)
+      if callback then
+        return callback(err, ...)
+      end
+      if err then
+        return reset(err)
+      end
+      return ...
+    end
+    if not conn_inst.is_open() then return cb(errors.ReQLDriverError(r, 'Connection is closed.')) end
+
+    -- Construct query
+    local token, err = protocol_inst.server_info()
+
+    if not token then
+      return cb(err)
+    end
+
+    return cb(make_cursor(token, {}, {}).to_array())
+  end
+
+  return conn_inst
+end
+
+return connection_instance

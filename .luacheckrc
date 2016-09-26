@@ -1,4 +1,3 @@
 std = 'min'
-globals = {'ngx', 'jit'}
+exclude_files = {'here'}
 files['spec'] = {std = '+busted'}
-files['src/rethinkdb/unpack.lua'] = {std = '+max'}

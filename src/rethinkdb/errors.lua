@@ -1,124 +1,91 @@
-local carrot_marker = {}
+--- Interface to the ReQL error heiarchy.
+-- @module rethinkdb.errors
+-- @author Adam Grandquist
+-- @license Apache
+-- @copyright Adam Grandquist 2016
 
-local function carrotify(tree)
-  return {carrot_marker, tree}
+local heiarchy = {
+  ReQLDriverError = 'ReQLError',
+
+  ReQLAuthError = 'ReQLDriverError',
+
+  ReQLServerError = 'ReQLError',
+
+  ReQLClientError = 'ReQLServerError',
+  ReQLCompileError = 'ReQLServerError',
+  ReQLRuntimeError = 'ReQLServerError',
+
+  ReQLAvailabilityError = 'ReQLRuntimeError',
+  ReQLInternalError = 'ReQLRuntimeError',
+  ReQLPermissionsError = 'ReQLRuntimeError',
+  ReQLQueryLogicError = 'ReQLRuntimeError',
+  ReQLResourceLimitError = 'ReQLRuntimeError',
+  ReQLTimeoutError = 'ReQLRuntimeError',
+  ReQLUserError = 'ReQLRuntimeError',
+
+  ReQLOpFailedError = 'ReQLAvailabilityError',
+  ReQLOpIndeterminateError = 'ReQLAvailabilityError',
+
+  ReQLNonExistenceError = 'ReQLQueryLogicError'
+}
+
+local error_inst_meta_table = {}
+
+function error_inst_meta_table.__tostring(err)
+  return err.message()
 end
 
-local function compose_term(term)
-  if type(term) ~= 'table' then return '' .. term end
-  local args = {}
-  for i, arg in ipairs(term.args) do
-    args[i] = compose_term(arg)
-  end
-  local optargs = {}
-  for key, arg in pairs(term.optargs) do
-    optargs[key] = compose_term(arg)
-  end
-  return term:compose(args, optargs)
-end
+local errors_meta_table = {}
 
-local function compose_carrots(term, frames)
-  local frame = table.remove(frames, 1)
-  local args = {}
-  for i, arg in ipairs(term.args) do
-    if frame == (i - 1) then
-      args[i] = compose_carrots(arg, frames)
-    else
-      args[i] = compose_term(arg)
+function errors_meta_table.__index(_, name)
+  --- Errors have the following heiarchy.
+  -- - ReQLError
+  --   - ReQLDriverError
+  --     - ReQLAuthError
+  --   - ReQLServerError
+  --     - ReQLClientError
+  --     - ReQLCompileError
+  --     - ReQLRuntimeError
+  --       - ReQLAvailabilityError
+  --         - ReQLOpFailedError
+  --         - ReQLOpIndeterminateError
+  --       - ReQLInternalError
+  --         - ReQLQueryLogicError
+  --       - ReQLNonExistenceError
+  --       - ReQLResourceLimitError
+  --       - ReQLTimeoutError
+  --       - ReQLUserError
+  -- An error instance has properties pointing to itself for each category it is
+  -- a part of.
+  local function ReQLError(r, msg, term, frames)
+    --- Error message string from server without attached query.
+    local error_inst = setmetatable({r = r, msg = msg}, error_inst_meta_table)
+
+    local _name = name
+    while _name do
+      error_inst[_name] = error_inst
+      _name = rawget(heiarchy, _name)
     end
-  end
-  local optargs = {}
-  for key, arg in pairs(term.optargs) do
-    if frame == key then
-      optargs[key] = compose_carrots(arg, frames)
-    else
-      optargs[key] = compose_term(arg)
-    end
-  end
-  if frame then
-    return term:compose(args, optargs)
-  end
-  return carrotify(term:compose(args, optargs))
-end
 
-local function join_tree(tree)
-  local str = ''
-  for _, term in ipairs(tree) do
-    if type(term) == 'table' then
-      if #term == 2 and term[1] == carrot_marker then
-        str = str .. join_tree(term[2]):gsub('.', '^')
-      else
-        str = str .. join_tree(term)
+    --- Provide a detailed message showing error category, problem, and location
+    -- in query. This is more relevant for ReQLServerErrors.
+    function error_inst.message()
+      local _message = name .. ' ' .. error_inst.msg
+      if term and frames then
+        _message = _message .. ' in:\n[' .. table.concat(frames, ', ') .. ']'  -- @todo rewrite the query printer
       end
-    else
-      str = str .. term
-    end
-  end
-  return str
-end
-
-local function print_query(term, frames)
-  local carrots
-  if next(frames) then
-    carrots = compose_carrots(term, frames)
-  else
-    carrots = {carrotify(compose_term(term))}
-  end
-  carrots = join_tree(carrots):gsub('[^%^]', '')
-  return join_tree(compose_term(term)) .. '\n' .. carrots
-end
-
-local function new_error_type(name, parent)
-  local inst = {__name = name}
-
-  return function(msg, term, frames)
-    function inst.message()
-      local _message = name .. ' ' .. msg
-      if term then
-        _message = _message .. ' in:\n' .. print_query(term, frames)
-      end
-      function inst.message()
+      function error_inst.message()
         return _message
       end
       return _message
     end
 
-    inst.__parent = parent
-    inst.msg = msg
-
-    return setmetatable(inst, {__index = inst.__parent})
+    return error_inst
   end
+
+  return ReQLError
 end
 
-local ReQLError = {__name = 'ReQLError'}
+local errors = setmetatable({}, errors_meta_table)
 
-local ReQLDriverError = new_error_type('ReQLDriverError', ReQLError)
-local ReQLServerError = new_error_type('ReQLServerError', ReQLError)()
-
-local ReQLRuntimeError = new_error_type('ReQLRuntimeError', ReQLServerError)
-
-local ReQLAvailabilityError = new_error_type('ReQLAvailabilityError', ReQLRuntimeError())
-local ReQLQueryLogicError = new_error_type('ReQLQueryLogicError', ReQLRuntimeError())
-
-return {
-  ReQLDriverError = ReQLDriverError,
-
-  ReQLRuntimeError = ReQLRuntimeError,
-  ReQLCompileError = new_error_type('ReQLCompileError', ReQLServerError),
-
-  ReQLAuthError = new_error_type('ReQLAuthError', ReQLDriverError()),
-
-  ReQLClientError = new_error_type('ReQLClientError', ReQLServerError),
-
-  ReQLAvailabilityError = ReQLAvailabilityError,
-  ReQLInternalError = new_error_type('ReQLInternalError', ReQLRuntimeError()),
-  ReQLQueryLogicError = ReQLQueryLogicError,
-  ReQLResourceLimitError = new_error_type('ReQLResourceLimitError', ReQLRuntimeError()),
-  ReQLTimeoutError = new_error_type('ReQLTimeoutError', ReQLRuntimeError()),
-  ReQLUserError = new_error_type('ReQLUserError', ReQLRuntimeError()),
-
-  ReQLOpFailedError = new_error_type('ReQLOpFailedError', ReQLAvailabilityError()),
-  ReQLOpIndeterminateError = new_error_type('ReQLOpIndeterminateError', ReQLAvailabilityError()),
-
-  ReQLNonExistenceError = new_error_type('ReQLNonExistenceError', ReQLQueryLogicError())
-}
+return errors
